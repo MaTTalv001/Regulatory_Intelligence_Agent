@@ -8,3 +8,4 @@ backend/app/static/*
 .venv/
 *.egg-info/
 *reference/
+.DS_Store

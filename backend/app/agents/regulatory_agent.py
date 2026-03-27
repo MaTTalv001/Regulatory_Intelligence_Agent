@@ -13,7 +13,6 @@ from app.agents.tools.fda_tools import (
     search_fda_shortages,
 )
 from app.agents.tools.ema_tools import (
-    search_ema_epi,
     search_ema_events,
     search_ema_medicines,
     search_ema_safety_communications,
@@ -37,7 +36,6 @@ Your capabilities:
 - Find EMA safety communications (DHPC)
 - Search EMA regulatory events and meetings
 - Search EMA drug shortages
-- Query EMA electronic Product Information (ePI)
 
 Guidelines:
 - Always cite the data source (FDA/EMA) and relevant identifiers
@@ -61,7 +59,6 @@ ALL_TOOLS = [
     search_ema_safety_communications,
     search_ema_events,
     search_ema_shortages,
-    search_ema_epi,
 ]
 
 

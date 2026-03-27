@@ -19,7 +19,6 @@ TOOL_LABELS: dict[str, str] = {
     "search_ema_safety_communications": "EMA 安全性情報（DHPC）を検索中",
     "search_ema_events": "EMA 規制イベント情報を検索中",
     "search_ema_shortages": "EMA 供給不足情報を検索中",
-    "search_ema_epi": "EMA 電子添文（ePI）を照会中",
 }
 
 

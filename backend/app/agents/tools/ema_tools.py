@@ -1,12 +1,21 @@
 """EMA data tools for the Strands regulatory agent."""
 
+import logging
+import threading
+import time
+
 import httpx
 from strands import tool
 
 from app.config import settings
 from app.agents.event_stream import tool_start, tool_end
 
-_TIMEOUT = 30.0
+logger = logging.getLogger(__name__)
+
+_TIMEOUT = 60.0
+_MAX_RETRIES = 3
+_INITIAL_BACKOFF = 2.0  # seconds
+_REQUEST_INTERVAL = 1.5  # seconds between requests to avoid 429
 
 EMA_JSON_FILES = {
     "medicines": "medicines-output-medicines_json-report_en.json",
@@ -16,16 +25,61 @@ EMA_JSON_FILES = {
     "referrals": "referrals-output-json-report_en.json",
 }
 
+_rate_lock = threading.Lock()
+_last_request_time: float = 0.0
+
+
+def _wait_for_rate_limit():
+    """Wait if needed to respect the minimum interval between EMA requests."""
+    global _last_request_time
+    with _rate_lock:
+        now = time.monotonic()
+        elapsed = now - _last_request_time
+        if _last_request_time > 0 and elapsed < _REQUEST_INTERVAL:
+            time.sleep(_REQUEST_INTERVAL - elapsed)
+        _last_request_time = time.monotonic()
+
 
 def _fetch_ema_json(dataset: str) -> list[dict]:
     filename = EMA_JSON_FILES.get(dataset)
     if not filename:
         raise ValueError(f"Unknown dataset: {dataset}")
     url = f"{settings.ema_base_url}/{filename}"
-    with httpx.Client(timeout=60.0, follow_redirects=True) as client:
-        resp = client.get(url)
-        resp.raise_for_status()
-        return resp.json()
+
+    for attempt in range(_MAX_RETRIES):
+        _wait_for_rate_limit()
+        try:
+            with httpx.Client(timeout=_TIMEOUT, follow_redirects=True) as client:
+                resp = client.get(url)
+                if resp.status_code == 429:
+                    backoff = _INITIAL_BACKOFF * (2 ** attempt)
+                    logger.warning(
+                        "EMA 429 rate-limited for %s, retrying in %.1fs (attempt %d/%d)",
+                        dataset, backoff, attempt + 1, _MAX_RETRIES,
+                    )
+                    time.sleep(backoff)
+                    continue
+                resp.raise_for_status()
+                payload = resp.json()
+                if isinstance(payload, dict) and "data" in payload:
+                    return payload["data"]
+                return payload
+        except httpx.TimeoutException:
+            if attempt < _MAX_RETRIES - 1:
+                backoff = _INITIAL_BACKOFF * (2 ** attempt)
+                logger.warning(
+                    "EMA timeout for %s, retrying in %.1fs (attempt %d/%d)",
+                    dataset, backoff, attempt + 1, _MAX_RETRIES,
+                )
+                time.sleep(backoff)
+            else:
+                raise
+
+    raise httpx.HTTPStatusError(
+        f"EMA API rate-limited after {_MAX_RETRIES} retries",
+        request=httpx.Request("GET", url),
+        response=resp,
+    )
 
 
 @tool
@@ -167,8 +221,8 @@ def search_ema_shortages(
     matches = []
     for s in data:
         searchable = " ".join([
-            str(s.get("name_of_medicine", "")),
-            str(s.get("active_substance", "")),
+            str(s.get("medicine_affected", "")),
+            str(s.get("international_non_proprietary_name_inn_or_common_name", "")),
         ]).lower()
         if query_lower in searchable:
             matches.append(s)
@@ -176,51 +230,3 @@ def search_ema_shortages(
                 break
     tool_end("search_ema_shortages")
     return {"total_found": len(matches), "shortages": matches}
-
-
-@tool
-def search_ema_epi(
-    medicine_name: str,
-) -> dict:
-    """Search EMA electronic Product Information (ePI) using the FHIR API.
-
-    Args:
-        medicine_name: Name of the medicine to search.
-
-    Returns:
-        ePI List resources with bundle references for the medicine.
-    """
-    tool_start("search_ema_epi", {"medicine_name": medicine_name})
-    url = f"{settings.ema_epi_base_url}/List"
-    params = {"title": medicine_name}
-    with httpx.Client(timeout=_TIMEOUT) as client:
-        resp = client.get(url, params=params)
-        resp.raise_for_status()
-        data = resp.json()
-    entries = data.get("entry", [])
-    results = []
-    for entry in entries[:10]:
-        resource = entry.get("resource", {})
-        subject = resource.get("subject", {})
-        extensions = subject.get("extension", [])
-        mah = ""
-        procedure = ""
-        for ext in extensions:
-            ext_url = ext.get("url", "")
-            if "marketingAuthorisationHolder" in ext_url:
-                mah = ext.get("valueCoding", {}).get("display", "")
-            elif "procedureNumber" in ext_url:
-                procedure = ext.get("valueIdentifier", {}).get("value", "")
-        bundles = [
-            e.get("item", {}).get("reference", "")
-            for e in resource.get("entry", [])
-        ]
-        results.append({
-            "id": resource.get("id"),
-            "title": resource.get("title"),
-            "mah": mah,
-            "procedure_number": procedure,
-            "bundles": bundles,
-        })
-    tool_end("search_ema_epi")
-    return {"total_found": len(results), "products": results}
